@@ -7,8 +7,10 @@ Description: generate grasps in large-scale, use multiple graphics cards, no log
 import os
 import sys
 
-sys.path.append(os.path.realpath('.'))
+#把项目根目录加入路径
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
+#print(sys.path)
 import argparse
 import multiprocessing
 import numpy as np
@@ -28,16 +30,18 @@ from utils.rot6d import robust_compute_rotation_matrix_from_ortho6d
 from torch.multiprocessing import set_start_method
 
 try:
+    #用spawn方法启动多进程，spawn为每个进程初始化CUDA
     set_start_method('spawn')
 except RuntimeError:
     pass
 
-
+#避免OpenMP/MKL重复加载导致崩溃
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 np.seterr(all='raise')
 
 
 def generate(args_list):
+
     args, object_code_list, id, gpu_list = args_list
 
     np.random.seed(args.seed)
@@ -51,6 +55,8 @@ def generate(args_list):
     os.environ['CUDA_VISIBLE_DEVICES'] = gpu_list[worker - 1]
     device = torch.device('cuda')
 
+    #HandModel内部包含手模型的关节结构及网格的路径，接触点和穿透点
+    #hand_pose是优化变量
     hand_model = HandModel(
         mjcf_path='mjcf/shadow_hand_wrist_free.xml',
         mesh_path='mjcf/meshes',
@@ -58,7 +64,7 @@ def generate(args_list):
         penetration_points_path='mjcf/penetration_points.json',
         device=device
     )
-
+    #object_model是被抓物体
     object_model = ObjectModel(
         data_root_path=args.data_root_path,
         batch_size_each=args.batch_size_each,
@@ -66,7 +72,7 @@ def generate(args_list):
         device=device
     )
     object_model.initialize(object_code_list)
-
+    #抓取初始化
     initialize_convex_hull(hand_model, object_model, args)
     
     hand_pose_st = hand_model.hand_pose.detach()
@@ -91,11 +97,13 @@ def generate(args_list):
         w_spen=args.w_spen,
         w_joints=args.w_joints,
     )
+    #能量函数（抓取质量）
     energy, E_fc, E_dis, E_pen, E_spen, E_joints = cal_energy(hand_model, object_model, verbose=True, **weight_dict)
 
     energy.sum().backward(retain_graph=True)
 
     for step in range(1, args.n_iter + 1):
+        #随机perturb手的姿态
         s = optimizer.try_step()
 
         optimizer.zero_grad()
@@ -104,6 +112,7 @@ def generate(args_list):
         new_energy.sum().backward(retain_graph=True)
 
         with torch.no_grad():
+            #能量下降则接受，能量升高以一定概率接受
             accept, t = optimizer.accept_step(energy, new_energy)
 
             energy[accept] = new_energy[accept]
@@ -152,10 +161,13 @@ def generate(args_list):
                 E_spen=E_spen[idx].item(),
                 E_joints=E_joints[idx].item(),
             ))
+        #保存结果（生成数据集）
         np.save(os.path.join(args.result_path, object_code + '.npy'), data_list, allow_pickle=True)
 
 
 if __name__ == '__main__':
+    #定义这个脚本可以接受哪些命令行参数，把在终端输入的--xxx 变成 Python 里的 args.xxx
+    #创建一个“参数说明书”对象，告诉 Python：这个程序可以接收哪些命令行参数
     parser = argparse.ArgumentParser()
     # experiment settings
     parser.add_argument('--result_path', default="../data/graspdata", type=str)
@@ -192,6 +204,7 @@ if __name__ == '__main__':
     parser.add_argument('--thres_dis', default=0.005, type=float)
     parser.add_argument('--thres_pen', default=0.001, type=float)
 
+    #从命令行读取你输入的--xxx参数，并存到args里
     args = parser.parse_args()
 
     gpu_list = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
@@ -240,6 +253,7 @@ if __name__ == '__main__':
 
     random.seed(args.seed)
     random.shuffle(object_code_list)
+    #任务切分，控制单个 GPU 同时处理多少个物体
     objects_each = args.max_total_batch_size // args.batch_size_each
     object_code_groups = [object_code_list[i: i + objects_each] for i in range(0, len(object_code_list), objects_each)]
 
