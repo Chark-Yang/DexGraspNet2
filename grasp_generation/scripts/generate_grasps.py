@@ -64,13 +64,14 @@ def generate(args_list):
         penetration_points_path='mjcf/penetration_points.json',
         device=device
     )
-    #object_model是被抓物体
+    #object_model是被抓物体；ObjectModel是一个类
     object_model = ObjectModel(
         data_root_path=args.data_root_path,
         batch_size_each=args.batch_size_each,
         num_samples=2000, 
         device=device
     )
+
     object_model.initialize(object_code_list)
     #抓取初始化
     initialize_convex_hull(hand_model, object_model, args)
@@ -87,25 +88,33 @@ def generate(args_list):
         'mu': args.mu,
         'device': device
     }
+    #构造模拟退火优化器对象
+    # **optim_config 是把字典里的键值对展开成关键字参数传给函数
     optimizer = Annealing(hand_model, **optim_config)
 
     # optimize
-    
+    #定义能量函数，抓取能量的加权系数
+    #w_dis是距离能量的权重，w_pen是穿透能量的权重，w_spen是自穿透能量的权重，w_joints是关节能量的权重
     weight_dict = dict(
         w_dis=args.w_dis,
         w_pen=args.w_pen,
         w_spen=args.w_spen,
         w_joints=args.w_joints,
     )
-    #能量函数（抓取质量）
+    #计算初始能量，其余是分项能量
     energy, E_fc, E_dis, E_pen, E_spen, E_joints = cal_energy(hand_model, object_model, verbose=True, **weight_dict)
 
+    #初始能量的梯度
+    #.sum()是把 batch 维度加起来，变成标量，才能调用 backward()
+    #.backward()反向传播，计算梯度
+    #retain_graph=True 保留计算图，以便后续继续调用 backward()
     energy.sum().backward(retain_graph=True)
 
+    #模拟退火主循环
     for step in range(1, args.n_iter + 1):
         #随机perturb手的姿态
         s = optimizer.try_step()
-
+        
         optimizer.zero_grad()
         new_energy, new_E_fc, new_E_dis, new_E_pen, new_E_spen, new_E_joints = cal_energy(hand_model, object_model, verbose=True, **weight_dict)
 
@@ -124,6 +133,7 @@ def generate(args_list):
 
 
     # save results
+
     translation_names = ['WRJTx', 'WRJTy', 'WRJTz']
     rot_names = ['WRJRx', 'WRJRy', 'WRJRz']
     joint_names = [
@@ -215,16 +225,18 @@ if __name__ == '__main__':
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     random.seed(args.seed)
-
+    #创建结果保存目录
     if not os.path.exists(args.result_path):
         os.makedirs(args.result_path)
-    
+    #检查数据集路径是否存在,否则报错
     if not os.path.exists(args.data_root_path):
         raise ValueError(f'data_root_path {args.data_root_path} doesn\'t exist')
-    
+    #object_code_list 和 all 
     if (args.object_code_list is not None) + args.all != 1:
         raise ValueError('exactly one among \'object_code_list\' \'all\' should be specified')
     
+    #object_code_list_all是数据集里所有物体的列表;
+    #如果指定了--todo参数，则只处理 todo.txt 里的物体,否则处理 data_root_path 目录下的所有物体
     if args.todo:
         with open("todo.txt", "r") as f:
             lines = f.readlines()
@@ -232,6 +244,8 @@ if __name__ == '__main__':
     else:
         object_code_list_all = os.listdir(args.data_root_path)
     
+    #object_code_list是本次要处理的物体列表; object_code_list_all是数据集里所有物体的列表
+    #前者是后者的子集，否则报错；如果没指定前者，则用后者
     if args.object_code_list is not None:
         object_code_list = args.object_code_list
         if not set(object_code_list).issubset(set(object_code_list_all)):
@@ -244,6 +258,7 @@ if __name__ == '__main__':
             if os.path.exists(os.path.join(args.result_path, object_code + '.npy')):
                 object_code_list.remove(object_code)
 
+    #batch_size_each 应该比 max_total_batch_size 小，否则报错
     if args.batch_size_each > args.max_total_batch_size:
         raise ValueError(f'batch_size_each {args.batch_size_each} should be smaller than max_total_batch_size {args.max_total_batch_size}')
     

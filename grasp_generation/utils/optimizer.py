@@ -52,7 +52,7 @@ class Annealing:
 
         device='cpu': 计算设备（CPU/GPU）
         """
-
+        #初始化优化器参数，数值转化成torch张量
         self.hand_model = hand_model
         self.device = device
         self.switch_possibility = switch_possibility
@@ -63,7 +63,7 @@ class Annealing:
         self.step_size_period = torch.tensor(stepsize_period, dtype=torch.long, device=device)
         self.mu = torch.tensor(mu, dtype=torch.float, device=device)
         self.step = 0
-
+        #保存旧的参数值
         self.old_hand_pose = None
         self.old_contact_point_indices = None
         self.old_global_transformation = None
@@ -83,18 +83,27 @@ class Annealing:
         s: torch.Tensor
             current step size
         """
-        #
+        #计算步长，随迭代次数增加而逐渐减小的步长
         s = self.step_size * self.temperature_decay ** torch.div(self.step, self.step_size_period, rounding_mode='floor')
+        #构造一个与hand_pose形状相同的步长张量，将s赋值给step_size
         step_size = torch.zeros(*self.hand_model.hand_pose.shape, dtype=torch.float, device=self.device) + s
-
+        #更新ema_grad_hand_pose,EMA梯度平方
         self.ema_grad_hand_pose = self.mu * (self.hand_model.hand_pose.grad ** 2).mean(0) + \
             (1 - self.mu) * self.ema_grad_hand_pose
-
+        #自适应梯度下降，计算hand_pose,RMSProp,梯度大的维度步长小，梯度小的维度步长大
         hand_pose = self.hand_model.hand_pose - \
             step_size * self.hand_model.hand_pose.grad / (torch.sqrt(self.ema_grad_hand_pose) + 1e-6)
+        #获取batch_size和接触点数量
         batch_size, n_contact = self.hand_model.contact_point_indices.shape
+        #torch.rand生成均匀分布的随机数，生成形状为(batch_size, n_contact)的张量
+        #策略是大多数接触点保持不动，少部分接触点随机切换
         switch_mask = torch.rand(batch_size, n_contact, dtype=torch.float, device=self.device) < self.switch_possibility
+        #拷贝当前接触点索引
         contact_point_indices = self.hand_model.contact_point_indices.clone()
+        #torch.randint,只有1个整数参数，是对应的上限，下限默认是0,范围是[0, n_contact_candidates)
+        #self.hand_model.n_contact_candidates: 手部模型中可用的接触点候选数量
+        #contact_point_indices[switch_mask]不是索引（i，j），而是那些位置上的值的集合；结合右边，实际修改的就是对应索引（i,j）的值；contact_point_indices是一个二维张量；switch_mask也是一个二维张量，true false的二维
+
         contact_point_indices[switch_mask] = torch.randint(self.hand_model.n_contact_candidates, size=[switch_mask.sum()], device=self.device)
 
         self.old_hand_pose = self.hand_model.hand_pose
