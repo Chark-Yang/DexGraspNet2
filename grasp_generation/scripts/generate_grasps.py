@@ -252,7 +252,9 @@ if __name__ == '__main__':
             raise ValueError('object_code_list isn\'t a subset of dirs in data_root_path')
     else:
         object_code_list = object_code_list_all
-    
+    #指定是否覆盖
+    #不覆盖，就移除，即不处理那些已经存在结果文件的物体
+    #覆盖，不移除，都生成抓取结果，这样就会覆盖原有文件
     if not args.overwrite:
         for object_code in object_code_list.copy():
             if os.path.exists(os.path.join(args.result_path, object_code + '.npy')):

@@ -98,8 +98,10 @@ class HandModel:
                 else:
                     self.mesh[link_name]['geom_param'] = body.link.visuals[0].geom_param
                 areas[link_name] = tm.Trimesh(link_vertices.cpu().numpy(), link_faces.cpu().numpy()).area.item()
+            #递归
             for children in body.children:
                 build_mesh_recurse(children)
+        #函数调用
         build_mesh_recurse(self.chain._root)
 
         # set joint limits
@@ -113,35 +115,50 @@ class HandModel:
                 self.joints_names.append(body.joint.name)
                 self.joints_lower.append(body.joint.range[0])
                 self.joints_upper.append(body.joint.range[1])
+            #递归
             for children in body.children:
                 set_joint_range_recurse(children)
+        #函数调用
         set_joint_range_recurse(self.chain._root)
         self.joints_lower = torch.stack(self.joints_lower).float().to(device)
         self.joints_upper = torch.stack(self.joints_upper).float().to(device)
 
         # sample surface points
-
+        #计算总面积
         total_area = sum(areas.values())
+        #根据每个link面积占总面积的比例分配采样点数量
         num_samples = dict([(link_name, int(areas[link_name] / total_area * n_surface_points)) for link_name in self.mesh])
+        #采样点不足时，都分配给第一个link
         num_samples[list(num_samples.keys())[0]] += n_surface_points - sum(num_samples.values())
         for link_name in self.mesh:
+            #如果没有采样点，赋值空张量，避免后续报错
             if num_samples[link_name] == 0:
                 self.mesh[link_name]['surface_points'] = torch.tensor([], dtype=torch.float, device=device).reshape(0, 3)
                 continue
+            #先构造pytorch3d的mesh对象,由顶点和面组成
             mesh = pytorch3d.structures.Meshes(self.mesh[link_name]['vertices'].unsqueeze(0), self.mesh[link_name]['faces'].unsqueeze(0))
+            #密集采样，在mesh表面均匀随机采样，过采样100倍
             dense_point_cloud = pytorch3d.ops.sample_points_from_meshes(mesh, num_samples=100 * num_samples[link_name])
+            #使用最远点采样算法（fps），选取指定数量的点，保证点之间的距离较远，更均匀分布
             surface_points = pytorch3d.ops.sample_farthest_points(dense_point_cloud, K=num_samples[link_name])[0][0]
+            #移动到指定device
             surface_points.to(dtype=float, device=device)
+            #保存采样点
             self.mesh[link_name]['surface_points'] = surface_points
 
         # indexing
-
+        #zip函数把两个list打包成dict，link_name到link_index的映射
         self.link_name_to_link_index = dict(zip([link_name for link_name in self.mesh], range(len(self.mesh))))
-
+        #接触点的候选集合
         self.contact_candidates = [self.mesh[link_name]['contact_candidates'] for link_name in self.mesh]
+        #sum 如果item是数字，数值加法；如果item是list,则是列表拼接；i本身是指的link_name对应的link_index,现在进行列表拼接之后，由第几个点就可以判断出是属于哪个link的
+        #比如第5个点对应的是2,那么就说明是第2个link的点
         self.global_index_to_link_index = sum([[i] * len(contact_candidates) for i, contact_candidates in enumerate(self.contact_candidates)], [])
+        #拼成大tensor
         self.contact_candidates = torch.cat(self.contact_candidates, dim=0)
+        #把索引映射转成tensor
         self.global_index_to_link_index = torch.tensor(self.global_index_to_link_index, dtype=torch.long, device=device)
+        #记录总数量
         self.n_contact_candidates = self.contact_candidates.shape[0]
 
         self.penetration_keypoints = [self.mesh[link_name]['penetration_keypoints'] for link_name in self.mesh]
@@ -176,18 +193,32 @@ class HandModel:
         self.global_translation = self.hand_pose[:, 0:3]
         self.global_rotation = robust_compute_rotation_matrix_from_ortho6d(self.hand_pose[:, 3:9])
         self.current_status = self.chain.forward_kinematics(self.hand_pose[:, 9:])
+        #如果接触点索引不是空
         if contact_point_indices is not None:
+            #赋值接触点索引
             self.contact_point_indices = contact_point_indices
             batch_size, n_contact = contact_point_indices.shape
+            #根据接触点索引获得接触点，是接触点的坐标
             self.contact_points = self.contact_candidates[self.contact_point_indices]
+            #根据接触点索引获取是哪个link的点
             link_indices = self.global_index_to_link_index[self.contact_point_indices]
+            #构建一个全是0的变换矩阵，形状是(batch_size, n_contact, 4, 4)
             transforms = torch.zeros(batch_size, n_contact, 4, 4, dtype=torch.float, device=self.device)
+            
             for link_name in self.mesh:
+                #mask是true/false矩阵
                 mask = link_indices == self.link_name_to_link_index[link_name]
+                #获取当前link的变换矩阵,进行扩展，原始（B，4,4），.unsqueeze(1)变成（B,1,4,4），“我现在要为每个接触点准备一个 FK 变换”
+                #.expand把矩阵变成（B,n_contact,4,4），expand不复制数据，只是让pytorch认为，这一份 FK，可以被每个接触点共享
                 cur = self.current_status[link_name].get_matrix().unsqueeze(1).expand(batch_size, n_contact, 4, 4)
+                #根据mask的掩码，把对应位置的变换矩阵赋值给transforms
                 transforms[mask] = cur[mask]
+            #torch.cat拼接，由(B, n_contact, 3)变成(B, n_contact, 4)，方便进行4乘4矩阵变换
             self.contact_points = torch.cat([self.contact_points, torch.ones(batch_size, n_contact, 1, dtype=torch.float, device=self.device)], dim=2)
+            #transforms是（B, n_contact, 4, 4），contact_points是（B, n_contact, 4,1），矩阵乘法之后变成（B, n_contact, 4,1），取前3维，变成（B, n_contact, 3）
+            #把点从link的局部坐标系变换到手部的坐标系
             self.contact_points = (transforms @ self.contact_points.unsqueeze(3))[:, :, :3, 0]
+            #把点从手部坐标系变换到全局坐标系
             self.contact_points = self.contact_points @ self.global_rotation.transpose(1, 2) + self.global_translation.unsqueeze(1)
     
     def cal_distance(self, x):
