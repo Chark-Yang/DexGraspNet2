@@ -374,19 +374,32 @@ class HandModel:
         data: list
             list of plotly.graph_object visualization data
         """
+        #这个函数用于生成 Plotly 可视化数据，主要用于 3D 渲染手模型的网格和接触点
+        #如果提供了 pose（姿态矩阵），将其转换为 NumPy 数组（float32 类型），以便后续矩阵运算
         if pose is not None:
             pose = np.array(pose, dtype=np.float32)
         data = []
+        #遍历 self.mesh 字典中的每个节点名称（link_name）
+        #v代表vertices，f代表faces
         for link_name in self.mesh:
+            #获取当前状态下节点的顶点的变换矩阵
             v = self.current_status[link_name].transform_points(self.mesh[link_name]['vertices'])
+            #v 的形状是 3D（表示有批次，如 (batch_size, num_points, 3)），则选择第 i 个批次的顶点数据。
             if len(v.shape) == 3:
                 v = v[i]
+            #应用全局旋转（self.global_rotation[i].T 为转置）和全局平移（self.global_translation[i]）
+            #将顶点从局部坐标系变换到全局坐标系。
             v = v @ self.global_rotation[i].T + self.global_translation[i]
+            #从 PyTorch 计算图中分离 v（避免梯度计算），并移到 CPU 上,以便与 NumPy/Plotly 兼容
             v = v.detach().cpu()
+            #获取该链接的面索引 f，分离并移到 CPU
             f = self.mesh[link_name]['faces'].detach().cpu()
+            #如果提供了额外姿态 pose，应用其旋转和平移部分，进一步变换顶点。
             if pose is not None:
                 v = v @ pose[:3, :3].T + pose[:3, 3]
+            #创建 Plotly 的 Mesh3d 对象（3D 网格），使用变换后的顶点 v 和面索引 f，设置颜色和不透明度，并添加到 data 列表    
             data.append(go.Mesh3d(x=v[:, 0], y=v[:, 1], z=v[:, 2], i=f[:, 0], j=f[:, 1], k=f[:, 2], color=color, opacity=opacity))
+        #如果 with_contact_points 为 True，则添加接触点可视化。
         if with_contact_points:
             contact_points = self.contact_points[i].detach().cpu()
             if pose is not None:
